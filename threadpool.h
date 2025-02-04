@@ -34,7 +34,7 @@ public:
 	void setMode(const ThreadMode mode);
 	void start(const size_t size = 4);
 	void setTaskListMaxThreshold(const size_t size);
-	void submitTask(std::shared_ptr<Thread> sp);
+	void submitTask(std::shared_ptr<Task> sp);
 	/*
 	no expect copy construct & copy assign
 	*/
@@ -48,20 +48,21 @@ private:
 	/*
 		thread pool
 	*/
-	std::vector<Thread*> threadPool_;
+	//std::vector<Thread*> threadPool_;
+	std::vector<std::unique_ptr<Thread>> threadPool_;
 	size_t initThreadSize_;
 
 	/*
 		task list
 	*/
 	std::mutex taskListMtx_;
-	std::condition_variable taksListNotFull_;
-	std::condition_variable taksListNotEmpty_;
+	std::condition_variable taskListNotFull_;
+	std::condition_variable taskListNotEmpty_;
+
 	std::queue<std::shared_ptr<Task>> taskList_;
+	
 	std::atomic_uint taskSize_;
 	size_t taskMaxThreshold_;
-
-
 
 };
 

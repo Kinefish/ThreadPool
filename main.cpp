@@ -1,11 +1,22 @@
 #include "threadpool.h"
+#include "task.h"
 
-#include <chrono>
-#include <thread>
 int main() {
 	ThreadPool pool;
-	pool.start();
+	pool.start(4);
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
 
-	std::this_thread::sleep_for(std::chrono::seconds(3));
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
+	
+	pool.submitTask(std::make_shared<MyTask>());
+	pool.submitTask(std::make_shared<MyTask>());
+	
+	getchar();
 	return 0;
 }
