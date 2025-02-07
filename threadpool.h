@@ -2,6 +2,7 @@
 #define __THREADPOOL_H__
 #include <vector>
 #include <queue>
+#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -108,12 +109,17 @@ enum class ThreadMode {
 };
 class Thread {
 public:
-	using ThreadFunc = std::function<void()>;
+	using ThreadFunc = std::function<void(int)>;
 	Thread(ThreadFunc func);
 	~Thread();
 	void start();
+	int getThreadId() const {
+		return threadId_;
+	}
 private:
 	ThreadFunc func_;
+	static int generateThreadId_;
+	int threadId_;
 };
 
 class ThreadPool {
@@ -124,6 +130,7 @@ public:
 	void setMode(const ThreadMode mode);
 	void start(const size_t size = 4);
 	void setTaskListMaxThreshold(const size_t size);
+	void setThreadThreshold(const size_t size);
 	Result submitTask(std::shared_ptr<Task> sp);
 	/*
 	no expect copy construct & copy assign
@@ -131,16 +138,22 @@ public:
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool operator=(const ThreadPool&) = delete;
 private:
-	void threadFunc();
+	void threadFunc(int);
+	bool setRunningState();
 private:
 
+	std::atomic_bool isPoolRunning_;
 	ThreadMode mode_;
 	/*
 		thread pool
 	*/
 	//std::vector<Thread*> threadPool_;
-	std::vector<std::unique_ptr<Thread>> threadPool_;
+	//std::vector<std::unique_ptr<Thread>> threadPool_;	//虽然stl的size()可以提供当前线程数量，但是不是线程安全的
+	std::unordered_map<int, std::unique_ptr<Thread>> threadPool_;	//cached模式下的id映射
 	size_t initThreadSize_;
+	std::atomic_int idleThreadSize_;
+	std::atomic_int ThreadSizeThreshold_;
+	std::atomic_int curThreadSize_;
 
 	/*
 		task list
