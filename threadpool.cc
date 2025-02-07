@@ -19,7 +19,7 @@ void ThreadPool::setTaskListMaxThreshold(const size_t size) {
 }
 
 
-void ThreadPool::submitTask(std::shared_ptr<Task> sp) {
+Result ThreadPool::submitTask(std::shared_ptr<Task> sp) {
 	/*
 		1.get lock
 		2.judge notFull
@@ -33,11 +33,12 @@ void ThreadPool::submitTask(std::shared_ptr<Task> sp) {
 		[&]()->bool { return taskList_.size() < taskMaxThreshold_; })
 		)) {
 		std::cerr << "[time out] submit task fail." << std::endl;
-		return;
+		return Result(sp, false);
 	}
 	taskList_.emplace(sp);
 	taskSize_++;
 	taskListNotEmpty_.notify_all();
+	return Result(sp);
 }
 
 #include <functional>
@@ -92,7 +93,7 @@ void ThreadPool::threadFunc() {
 		}// release lock
 		
 		if (task)
-			task->run();
+			task->exec();
 	}
 }
 
@@ -119,3 +120,27 @@ void Thread::start() {
 	t.detach(); //set detach
 }
 
+/*
+class Task func
+*/
+void Task::exec() {
+	res_->setVal(run());
+}
+void Task::setResult(Result* res) {
+	res_ = res;
+}
+
+/*
+class Result func
+*/
+void Result::setVal(Any any) {
+	any_ = std::move(any);
+	sem_.post();
+}
+
+Any Result::get() {
+	if (!isValid_)
+		return "";
+	sem_.wait();
+	return std::move(any_);
+}
