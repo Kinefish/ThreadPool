@@ -13,6 +13,7 @@ public:
 		end_(end){ }
 	~MyTask() = default;
 	Any run() {
+		std::this_thread::sleep_for(std::chrono::seconds(2));
 		ulong sum = 0;
 		for (int i = begin_;i <= end_;i++) {
 			sum += i;

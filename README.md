@@ -237,3 +237,184 @@ private:
 	std::shared_ptr<Task> task_;
 };
 ```
+
+# 新增cached模式
+
+- 线程池的状态在`start()`之后不允许改变
+- 任务数量大于空闲线程数量需要创建线程，但要有个上限
+- 空闲线程过多，超过规定时间还没有任务执行，就回收
+
+# 线程回收
+
+- 任务正在执行的线程，等待任务执行完之后再回收线程
+
+- 正在阻塞的线程，先唤醒再回收线程
+
+## 先唤醒还是先取锁？
+
+```cpp
+~ThreadPool() {
+    isPoolRunning_ = false;
+    taskListNotEmpty_.notify_all();	//先唤醒还是先lock？
+    std::unique_lock<std::mutex> lock(taskListMtx_);
+	exitState_.wait(lock, [this]()->bool {return curThreadSize_ == 0;});
+}
+```
+
+## `while(isPoolRunning_)`的`loop`（死锁）
+
+> `cached`模式下，因为线程存在超时回收机制，所以没有死锁问题
+>
+> `fixed`模式下，因为只要没有析构线程池，并且没有任务的情况下，会一直阻塞等待
+
+1. 正常回收全部线程（短耗时任务）
+
+主线程`pool`没有出作用域的时候，所有任务都已经完成。全部线程进入`taskSize_ == 0`的等待状态，并且释放lock
+
+然后`pool`执行析构函数，修改`isPoolRunning_`变量，所有阻塞的线程因为`taskListNotEmpty_.notify_all();`被唤醒，随后`erase()`回收线程
+
+此时析构函数拿到`lock`，进入等待，直到等待条件成立，然后正常结束
+
+2. 只能回收已经阻塞的线程，`pool::~ThreadPool()`所在的线程和`threadFunc()`线程发生**死锁**
+
+当执行完任务之后，并且`isPoolRunning_`没有被修改，并且此时`pool`的析构函数也执行了`notify_all()`，但是`threadFunc()`还没执行到`taskNotEmpty.wait()`，就会导致再也没有可以唤醒的语句了，随后`threadFunc()`执行到`exitState_.wait()`，进入等待状态，释放`lock`，然后析构函数拿到`lock`，同时也再`wait`，导致**死锁**。**damn!**
+
+> 因为在析构函数中，先执行了唤醒，再拿锁等待，会导致死锁发生
+>
+> 当线程正在执行任务的时候，就算析构函数将`isPoolRunning_`修改为`false`，线程执行完后，会因为`while(isPoolRunning_)`跳出循环，进行回收
+
+```cpp
+/*
+会发生死锁
+*/
+threadFunc(int threadId) {
+    while(isPoolRunning_) {
+        std::shared_ptr<Task> task;
+        {	//抢任务的锁作用域，抢到任务后自动释放锁
+            std::unique_lock<std::mutex> lock(taskListMtx_);
+            while (taskSize_ == 0) {	//在taskSize_ == 0的时候循环阻塞
+                //线程阻塞
+                ...
+                if(mode::fixed)
+                    wait(lock)	//导致死锁的原因
+
+                //被唤醒的阻塞线程回收
+                if (!isPoolRunning_) {
+                    threadPool_.erase(thraedId); curThreadSize_--;
+                    exitState_.notify_all();
+                    std::cout << "[exit] threadId:" << std::this_thread::get_id() << std::endl;
+                    return;
+                }
+            }
+
+            //任务状态改变
+            ...
+
+        }// release lock
+
+        //执行任务
+        ...        
+}
+    //执行完任务并且pool == false 的线程回收
+    threadPool_.erase(thraedId); curThreadSize_--;
+    exitState_.notify_all();
+    std::cout << "[exit] threadId:" << std::this_thread::get_id() << std::endl;
+    return;
+}
+```
+
+## 解决死锁
+
+- 析构中先**取锁再唤醒**
+- 阻塞条件中加判断，提前`break`，`loop`外回收
+
+避免因为要回收，但是两个线程都进入等待状态。析构函数先取锁，可以让`threadFunc()`阻塞在`lock`语句，再进入空任务阻塞判断，新增`isPoolRunning_`判断，可以跳出loop，回收当前线程
+
+```cpp
+/*
+析构函数
+*/
+void ThreadPool::~ThreadPool() {
+    isPoolRunning = false;
+    std::unique_lock<std::mutex> lock(taskListMtx_);
+    taskListNotEmpty_.notify_all();
+    exitState_.wait(lock, [this]()->bool {return curThreadSize_ == 0;});
+}
+
+/*
+线程函数
+*/
+void ThreadPool::threadFunc() {
+    while(isPoolRunning_) {
+        std::shared_ptr<Task> task;
+        {
+            std::unique_lock<std::mutex> lock(taskListMtx_);
+            while (isPoolRunning && taskSize_ == 0) {
+                ...
+                if(mode::fixed)
+                    wait(lock)
+            }
+            if(!isPoolRunning) break;	//提前break
+
+        }
+    }
+    //统一回收线程
+    threadPool_.erase(thraedId); curThreadSize_--;
+    exitState_.notify_all();
+    std::cout << "[exit] threadId:" << std::this_thread::get_id() << std::endl;
+    return;
+}
+```
+
+## `while(1)`的`loop`
+
+- `get()`的调用对线程回收的影响
+
+> 任务的执行完毕默认为调用了`get()`函数，因为这个函数会阻塞语句，直到任务执行完毕
+
+如果线程池很快析构，并且没有主动调用`get()`等待执行结果，会导致直接回收线程，没有执行完任务再析构
+
+```cpp
+int main() {
+    {
+        ThreadPool pool;
+        pool.start();
+        Result res = pool.submitTask(std::make_shared<MyTask>(1,200));
+        //没有调用 R ret = res.get().cast_<R>(); 阻塞到任务完毕
+    }
+    //没有执行任务就回收线程了
+	return 0;
+}
+```
+
+- `while(1)`可以避免过快执行析构，修改`isPoolRunning_`状态，导致无法执行任务
+- 先判断任务数，再判断`isPoolRunning_`
+- 只要保证析构中先取锁再唤醒，就可以避免两个线程的**死锁**，无论任意其中一个先拿到锁，都会因为条件不满足，或者再下一轮`loop`中解锁
+
+无论是否调用`get()`，都需要保证完成任务再析构
+
+```cpp
+/*
+while(1) threadFunc()
+*/
+void ThreadPool::threadFunc() {
+    while(1) {
+        std::shared_ptr<Task> task;
+        {
+            std::unique_lock<std::mutex> lock(taskListMtx_);
+            while (taskSize_ == 0) {
+                if(!isPoolRuning) { //析构执行后，并且保证任务执行完
+					threadPool_.erase(thraedId); curThreadSize_--;
+                    exitState_.notify_all();
+                    std::cout << "[exit] threadId:" << std::this_thread::get_id() << std::endl;
+                    return;	
+                }
+                ...
+                if(mode::fixed)
+                    wait(lock)
+            }
+        }
+    }
+}
+```
+

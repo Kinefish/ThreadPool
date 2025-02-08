@@ -3,7 +3,7 @@
 
 const size_t MAX_TASK_THRESHOLD = 1024;
 const size_t MAX_THREAD_THRESHOLD = INT32_MAX;
-const size_t IDLETHREAD_TIME_OUT = 10;
+const size_t IDLETHREAD_TIME_OUT = 60;
 
 ThreadPool::ThreadPool()
 	:initThreadSize_(0),
@@ -15,7 +15,12 @@ ThreadPool::ThreadPool()
 	taskMaxThreshold_(MAX_TASK_THRESHOLD),
 	mode_(ThreadMode::MODE_FIXED) { }
 
-ThreadPool::~ThreadPool() {}
+ThreadPool::~ThreadPool() {
+	isPoolRunning_ = false;
+	std::unique_lock<std::mutex> lock(taskListMtx_);	//先取锁
+	taskListNotEmpty_.notify_all();	//再唤醒，避免死锁
+	exitState_.wait(lock, [this]()->bool {return curThreadSize_ == 0;});
+}
 
 void ThreadPool::setMode(const ThreadMode mode) {
 	if (setRunningState())
@@ -50,10 +55,10 @@ Result ThreadPool::submitTask(std::shared_ptr<Task> sp) {
 		4.nofity notEmpty
 	*/
 	std::unique_lock<std::mutex> lock(taskListMtx_);	//出作用域会解锁释放
-
+	 
 	if (!(taskListNotFull_.wait_for(lock,
 		std::chrono::seconds(1),
-		[&]()->bool { return taskList_.size() < taskMaxThreshold_; })
+		[this]()->bool { return taskSize_ < taskMaxThreshold_; })
 		)) {
 		std::cerr << "[time out] submit task fail." << std::endl;
 		return Result(sp, false);
@@ -115,15 +120,21 @@ void ThreadPool::threadFunc(int thraedId) {
 		std::shared_ptr<Task> task;
 		{
 			std::unique_lock<std::mutex> lock(taskListMtx_);
-
 			std::cout << "tid:" << std::this_thread::get_id() <<
 				"try get task" << std::endl;
+			
+			//在taskSize_ == 0的时候循环阻塞
+			while (taskSize_ == 0) {
+				if (!isPoolRunning_) {	//保证任务必须完成才回收
+					threadPool_.erase(thraedId); curThreadSize_--;
+					exitState_.notify_all();
+					std::cout << "[exit] threadId:" << std::this_thread::get_id() << std::endl;
+					return;
+				}
 
-			if (mode_ == ThreadMode::MODE_FIXED) {
-				taskListNotEmpty_.wait(lock, [&]()->bool {return taskSize_ > 0;});
-			}
-			else {	//MODE_CACHED
-				while(taskSize_ == 0) {
+				if (mode_ == ThreadMode::MODE_FIXED) {
+					taskListNotEmpty_.wait(lock);
+				} else {	//MODE_CACHED
 					if (std::cv_status::timeout ==
 						taskListNotEmpty_.wait_for(lock, std::chrono::seconds(1))) {
 						auto now = std::chrono::high_resolution_clock::now();
@@ -133,7 +144,7 @@ void ThreadPool::threadFunc(int thraedId) {
 							threadPool_.erase(thraedId);
 							curThreadSize_--;
 							idleThreadSize_--;
-							std::cout << "[exit] threadId:" << std::this_thread::get_id() << std::endl;
+							std::cout << "[ot exit] threadId:" << std::this_thread::get_id() << std::endl;
 							return;	//end this thread
 						}
 					}
@@ -148,7 +159,7 @@ void ThreadPool::threadFunc(int thraedId) {
 			taskList_.pop();
 			taskSize_--;
 
-			if (!taskList_.empty()) taskListNotEmpty_.notify_all(); //可以继续执行任务
+			if (taskSize_ > 0) taskListNotEmpty_.notify_all(); //可以继续执行任务
 
 			//可以继续提交任务
 			taskListNotFull_.notify_all();
@@ -158,8 +169,7 @@ void ThreadPool::threadFunc(int thraedId) {
 			task->exec();
 		timeStart = std::chrono::high_resolution_clock::now();
 		idleThreadSize_++;
-	}
-
+	}//end while
 }
 
 /*

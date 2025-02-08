@@ -13,28 +13,25 @@ static void test() {
 }
 
 int main() {
-	ThreadPool pool;
-	pool.setMode(ThreadMode::MODE_CACHED);
-	pool.start(2);
+	{
+		ThreadPool pool;
+		pool.setMode(ThreadMode::MODE_CACHED);
+		pool.start(2);
 
-	Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
-	Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-	Result res3 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
-	pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-	pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-	pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-	pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-	pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
+		Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
+		Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
+
+		Result res3 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
 
 
-	ulong sum1 = res1.get().cast_<ulong>();
-	ulong sum2 = res2.get().cast_<ulong>();
-	ulong sum3 = res3.get().cast_<ulong>();
-	ulong ret1 = (sum1 + sum2 + sum3);
+		/*ulong sum1 = res1.get().cast_<ulong>();
+		ulong sum2 = res2.get().cast_<ulong>();
+		ulong sum3 = res3.get().cast_<ulong>();
+		ulong ret1 = (sum1 + sum2 + sum3);
+		std::cout << " threadTest " << std::endl << ret1 << std::endl;*/
+	}//destory pool,release thread
+	std::cout << "main over" << std::endl;
 
-	std::cout << " threadTest " << std::endl << ret1 << std::endl;
-
-	
 	getchar();
 	return 0;
 }

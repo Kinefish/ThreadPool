@@ -128,7 +128,7 @@ public:
 	~ThreadPool();
 
 	void setMode(const ThreadMode mode);
-	void start(const size_t size = 4);
+	void start(const size_t size = std::thread::hardware_concurrency());
 	void setTaskListMaxThreshold(const size_t size);
 	void setThreadThreshold(const size_t size);
 	Result submitTask(std::shared_ptr<Task> sp);
@@ -141,7 +141,7 @@ private:
 	void threadFunc(int);
 	bool setRunningState();
 private:
-
+	std::condition_variable exitState_;
 	std::atomic_bool isPoolRunning_;
 	ThreadMode mode_;
 	/*
