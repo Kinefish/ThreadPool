@@ -1,6 +1,6 @@
-#include "threadpool.h"
-#include "task.h"
+#include "threadpool_recstr.h"
 
+using ulong = unsigned long long;
 static void test() {
 	std::cout << "===========================" << std::endl;
 	auto start = std::chrono::high_resolution_clock::now();
@@ -12,26 +12,53 @@ static void test() {
 	std::cout << " test " << std::endl << sum << std::endl << duration.count() << std::endl;
 }
 
+static int sum(int a, int b) {
+	std::this_thread::sleep_for(std::chrono::seconds(2));
+	return a + b;
+}
+static int sum2(int a, int b, int c) {
+	std::this_thread::sleep_for(std::chrono::seconds(2));
+	return a + b + c;
+}
+/*
+packaged_task是一个函数对象
+优化成
+pool.submitTask(sum,10,29,39);
+pool.submitTask(sum,10,29);
+改成可变参模板
+*/
+static void futureTest() {
+	std::packaged_task<int(int,int)> task_1(sum);
+	task_1(18, 28);
+
+	std::future<int> sum_1 = task_1.get_future();
+
+	std::cout << sum_1.get() << std::endl;
+	return;
+}
+
+static void recstrTest() {
+	ThreadPool_RECSTR pool;
+	pool.setMode(ThreadMode_RECSTR::MODE_CACHED);
+	pool.start(2);
+
+	std::future<int> res1 = pool.submitTask(sum, 1, 2);
+	std::future<int> res2 = pool.submitTask(sum2,1, 2, 3);
+	std::future<int> res3 = pool.submitTask(sum2,1, 2, 3);
+	std::future<int> res4 = pool.submitTask(sum2,1, 2, 3);
+	std::future<int> res5 = pool.submitTask(sum2,1, 2, 3);
+
+
+	std::cout << "====" << res1.get() << std::endl;
+	std::cout << "====" << res2.get() << std::endl;
+	std::cout << "====" << res3.get() << std::endl;
+	std::cout << "====" << res4.get() << std::endl;
+	std::cout << "====" << res5.get() << std::endl;
+
+}
 int main() {
-	{
-		ThreadPool pool;
-		pool.setMode(ThreadMode::MODE_CACHED);
-		pool.start(2);
 
-		Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
-		Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-
-		Result res3 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
-
-
-		/*ulong sum1 = res1.get().cast_<ulong>();
-		ulong sum2 = res2.get().cast_<ulong>();
-		ulong sum3 = res3.get().cast_<ulong>();
-		ulong ret1 = (sum1 + sum2 + sum3);
-		std::cout << " threadTest " << std::endl << ret1 << std::endl;*/
-	}//destory pool,release thread
-	std::cout << "main over" << std::endl;
-
+	recstrTest();
 	getchar();
 	return 0;
 }

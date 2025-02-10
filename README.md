@@ -418,3 +418,172 @@ void ThreadPool::threadFunc() {
 }
 ```
 
+# linux下编译动态库
+
+- `centos 10`
+
+- `gcc -v(14.2)`
+
+将`threadpool.cc`编译成`libtdpool.so`
+
+linux下，系统运行会去/usr/lib/，/usr/local/lib/下找*.a，*.so库；去/usr/include/，/usr/local/include/下找*.h
+
+- 编译动态库，`gcc`编译器下，需要新增`thread`头文件
+
+```bash
+g++ -fPIC -shared threadpool.cc -o libtdpool.so -std=c++17
+```
+
+- 编译源文件
+
+```bash
+g++ main.cpp -o main -lpthread -ltdpool -std=c++17
+```
+
+编译链接`main`后，`./main`出现报错，运行阶段找不到动态库
+
+```bash
+./main: error while loading shared libraries: libtdpool.so: cannot open shared object file: No such file or directory
+```
+
+需要在`/etc/ld.so.conf.d/`下新增`mylib.conf`，添加`/usr/local/lib`路径，执行`ldconfig`刷新，再运行
+
+# 重构
+
+> 使用可变参模板和`future`，`package_task`，`std::bind`，引用折叠重新进行任务提交，重写`submitTask`，相当于替换`Result`类
+
+## future和package_task的使用
+
+与`Result`类似，相当于提前获取任务结果，并且调用`x.get_furture()`的时候会阻塞到任务结束
+
+> 与用函数对象打包任务的区别是，`package_task`可以通过`future`机制，以阻塞的方式获取任务的返回值，符合线程池的任务提交，用户线程想要获取执行结果，需要等任务执行完的逻辑。
+>
+> 并且通过`decltype`语法，可以推导出任务返回值类型
+
+```cpp
+static int sum(int a, int b) {
+    return a + b;
+}
+int main() {
+    package_task<int(int, int)> task(sum);
+    future<int> ret = task.get_future();
+    std::thread t(std::move(task), 10, 20);	//package_task只支持右值引用的拷贝构造和拷贝赋值
+    std::cout << ret.get() << std::endl;
+    return 0;
+}
+```
+
+## 修改任务队列
+
+> 原先使用智能指针维护`Mytask`是为了避免提交生命周期较短的任务时，能够维持到执行结束，因为`shared_ptr`拥有资源计数
+
+- 新的任务->函数对象。不同的任务有不同返回值，如何声明一个能执行所有任务的函数对象？
+
+```cpp
+std::function<void()>
+```
+
+封装一层函数对象，在里边执行真正的任务，并且任务的所有参数通过`std::bind`绑定到`func`上。避免使用`MyTask`的时候，通过构造函数传参
+
+并且在放入队列的时候新增执行任务语句，这样`task->exec()`的时候，就会执行的绑定的任务
+
+```cpp
+taskList_.empalce(
+	[task](){(*task)()};
+)
+```
+
+- `submitTask()`打包任务，使用可变参模板，`packaged_task`，`future`，`decltype`重构任务结果的返回逻辑，用引用折叠确保左值、右值的正确转发
+
+```cpp
+/*
+	submitTask(func, args...);
+	return future<rType>类型
+	packaged_task<int(int, int)> task(sum)
+*/
+template<typename Func, typename... Args>
+auto submitTask(Func&& func, Args&&... args) -> std::future<decltype(func(args...))> {
+	//打包任务
+	using rType = decltype(func(args...));
+	auto task = std::make_shared<std::packaged_task<rType()>>(
+		std::bind(std::forward<Func>(func), std::forward<Args>(args)...)
+	);
+	std::future<rType> res = task->get_future();
+	//取锁
+	std::unique_lock<std::mutex> lock(taskListMtx_);
+	//超时提交
+	if (!(taskListNotFull_.wait_for(lock, std::chrono::seconds(1),
+		[this]()->bool {return taskSize_ < taskMaxThreshold_;}))) {
+		std::cerr << "[time out] submit task fail." << std::endl;
+		auto task = std::make_shared<std::packaged_task<rType()>>(
+			[]()->rType { return rType(); }
+		);
+		(*task)();	//解引用调用
+		return task->get_future();
+	}
+	//提交
+	taskList_.emplace([task]()->void { (*task)(); });
+	taskSize_++;
+	taskListNotEmpty_.notify_all();
+	//CACHED下新增线程
+	//不变
+
+	//返回future，在用户线程调用get()支持阻塞等结果
+	return res;
+}
+```
+
+## 使用引用折叠提交任务
+
+- 不进行引用折叠提交任务
+
+```cpp
+auto submitTask(Func func, Args... args)
+```
+
+进行函数对象`func`和参数`agrs`的值传递，会发生对应类的拷贝构造或者拷贝赋值。如果是复杂函数，或者复杂参数，性能开销更大
+
+并且在任务内部使用的是`copy`出来的副本，并不会对`submitTask`外的参数进行修改，在某些情况下，无法达到任务执行预期
+
+```cpp
+void modifyValue(int x) {
+    x += 10;
+    std::cout << "Inside function, value is: " << x << std::endl;
+}
+
+template <typename Func, typename Arg>
+void submitTask(Func func, Arg arg) {
+    // 按值传递 func 和 arg
+    func(arg);  // 执行函数
+}
+
+int main() {
+    int num = 5;
+
+    std::cout << "Before task submission, num = " << num << std::endl;
+
+    // 传入函数和变量
+    submitTask(modifyValue, num);
+
+    std::cout << "After task submission, num = " << num << std::endl;
+
+    return 0;
+}
+```
+
+执行结果将是
+
+```consle
+Before task submission, num = 5  
+Inside function, value is: 15  
+After task submission, num = 5  
+```
+
+- 使用引用折叠+`std::forward`进行转发，可以保持左值右值的传递
+
+```cpp
+template<typename Func, typename... Args>
+auto submitTask(Func&& func, Args&&... args) -> std::future<decltype(func(args...))> {
+}
+```
+
